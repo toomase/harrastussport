@@ -1,0 +1,114 @@
+---
+title: "Töötle Eesti Endomondo andmeid"
+output: html_notebook
+---
+
+Puhasta eelmise sammuga kraabitud Endomondo trennide andmed:
+  * jäta alles ainult trennid (st välista kogu muu info timeline pealt)
+  * ainult Eesti kasutajad
+  * tükelda andmed eraldi veergudesse (profiili info)
+  * jm andmetöötlus
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(anytime)
+library(lubridate)
+
+load("output/trennid_raw.RData")
+```
+
+
+Töötle andmeid
+```{r}
+trennid <- trennid_raw %>% 
+  # ainult eestlased
+  filter(str_detect(str_to_lower(profile_info), "estonia")) %>% 
+  # ainult trenni andmed
+  filter(str_detect(workout_url, "workouts")) %>% 
+  # ainult kindla spordialaga
+  filter(str_detect(workout_info, "was out")) %>% 
+  # eraldi spordiala workout_info veerust
+  mutate(workout_info_2 = str_replace(workout_info, "was out ", ""),
+         spordiala = word(workout_info_2, 1, sep = "\\. "),
+         spordiala = word(spordiala, 1, sep = " for | and tracked "),
+         spordiala = str_replace_all(spordiala, "\\.", "")) %>% 
+  # arvuta trenni kestvus period objektina
+  mutate(trenni_kestvus = word(workout_info, -1),
+         trenni_kestvus = str_replace(trenni_kestvus, "\\.$", ""),
+         trenni_kestvus = ifelse(!str_detect(trenni_kestvus, "h"), 
+                                 str_c("0h:", trenni_kestvus), trenni_kestvus),
+         trenni_kestvus = hms(trenni_kestvus)) %>% 
+  # arvuta trenni distants kilomeetrites
+  mutate(distants_km = str_extract(workout_info, " [0-9].* km"),
+         distants_km = as.numeric(str_replace(distants_km, "km", ""))) %>% 
+  # eralda profiili tunnused
+  mutate(profile_info_2 = str_replace_all(profile_info, ":\n", ":"),
+         profile_info_2 = str_replace_all(profile_info_2, "(^\n)|(\n$)", ""),
+         profile_info_2 = str_replace_all(profile_info_2, "\n", ";"),
+         synnipaev = anydate(str_extract(profile_info_2, "(?<=Birthday: )(.*?)(?=;)")),
+         sugu = str_trim(str_extract(profile_info_2, "(?<=Sex: )(.*?)(?=;)")),
+         pikkus_cm = str_extract(profile_info_2, "(?<=Height: )(.*?)(?=;)"),
+         pikkus_cm = as.numeric(str_replace_all(pikkus_cm, "cm", "")),
+         kaal_kg = str_extract(profile_info_2, "(?<=Weight: )(.*?)(?=;)"),
+         kaal_kg = as.numeric(str_replace_all(kaal_kg, "kg", "")),
+         lemmik_spordiala = str_trim(str_extract(profile_info_2, 
+                                                 "(?<=Favorite Sport: )(.*?)(?=;)"))) %>% 
+  select(-profile_info_2, -workout_info_2)
+
+trennid %>%
+  glimpse()
+```
+
+Kuna trenni kupäeva kuju on ebastandatne, siis tuleb seda töödelda:
+  * asena viimaste päevade nimed konkreetsete kuupäevadega
+  * muuda teksti väli date-time objektiks
+  * liida kellaajale 2 tundi, sest kraapimisel oli 2 tundi aeg taga
+  * juhul kui kuupäev on hilisem kui 15.07, siis arvesta, et tegemist on 2016. aastaga
+```{r}
+trenni_kp <- trennid %>% 
+  # arvuta trenni kuupäev ja kellaaeg
+  mutate(paeva_nimi = word(workout_date, 1)) %>% 
+  # asenda päeva nimi konkreetse kuupäevaga (andmete kraapimine toimus 15.07.2017)
+  mutate(workout_date_3 = case_when(.$paeva_nimi == "Yesterday" ~ "July 14",
+                                  .$paeva_nimi == "Thursday" ~ "July 13",
+                                  .$paeva_nimi == "Wednesday" ~ "July 12",
+                                  .$paeva_nimi == "Tuesday" ~ "July 11"),
+         workout_date_2 = ifelse(paeva_nimi %in% c("Yesterday", "Thursday",
+                                                   "Wednesday", "Tuesday"), 
+                                 str_replace(workout_date, paeva_nimi, workout_date_3),
+                                 workout_date),
+         workout_date_2 = str_replace(workout_date_2, " at", ""),
+         workout_date_4 = anytime(str_c("2017 ", workout_date_2)),
+         workout_date_5 = workout_date_4 + hours(2),
+         # leia aasta nr
+         aasta_nr = ifelse(workout_date_5 > dmy("15072017"), "2016", "2017"),
+         workout_date_6 = if_else(aasta_nr == "2016", workout_date_5 - years(1),
+                                    workout_date_5)) %>% 
+  filter(!is.na(workout_date_6)) %>% 
+  select(workout_url, workout_date_toodeldud = workout_date_6)
+```
+
+Lisa trenni andmetele date-time formaadis kuupäev
+```{r}
+trennid_toodeldud <- trennid %>% 
+  left_join(trenni_kp, by = "workout_url") %>% 
+  mutate(profile_workout = str_replace(workout_url, "../workouts/", ""),
+         profile = as.numeric(word(profile_workout, 2, sep = "/")),
+         workout = as.numeric(word(profile_workout, 1, sep = "/"))) %>% 
+  rename(raw_workout_date = workout_date) %>% 
+  select(profile, synnipaev, sugu, pikkus_cm, kaal_kg, lemmik_spordiala,
+         workout, workout_date = workout_date_toodeldud, spordiala,
+         trenni_kestvus, distants_km, raw_profile_info = profile_info,
+         raw_workout_date, raw_workout_info = workout_info)
+```
+
+
+```{r}
+glimpse(trennid_toodeldud)
+```
+
+Salvest töödeldud andmed trennid ekohta
+```{r}
+save(trennid_toodeldud, file = "output/trennid_toodeldud.RData")
+```

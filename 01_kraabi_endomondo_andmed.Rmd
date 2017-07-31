@@ -1,0 +1,244 @@
+---
+title: "Kraabi Endomondost andmed"
+output: html_notebook
+---
+
+Endomondost eeslaste sportimiste andmed:
+  * Selleks kasuta Eesti cahallangeid Endomondos, et leida eesti kasutajad.
+  * Seejärel kraabi nende kasutajate kohta trennide andmeid
+
+```{r setup}
+library(tidyverse)
+library(rvest)
+library(RSelenium)
+library(seleniumPipes)
+library(stringr)
+library(feather)
+
+# käsitsi kokku pandud info Eesti Endomondo challangete kohta
+# nendest saab leida Eesti kasutajate profiili ID-d
+eesti_endomondo_challange <- read_csv("data/eesti_endomondo_challange")
+```
+
+Esmalt tuleb Ubuntu puhul käivitada Seleniumi server läbi shelli kahe käsurea:
+
+$ sudo docker run -d -p 4445:4444 selenium/standalone-firefox
+$ sudo docker ps
+
+Seleniumi serveri sulgemiseks (käsurea lõpus olev nr on Container ID, mille saab käivituse käsust $ sudo docker ps):
+$ sudo docker stop 7e8466a91673
+
+Seejärel saab ühenduse üles ning alustada veebilehe kraapimist.
+
+Loo ühendus
+```{r}
+remDr <- remoteDr(port = 4445L)
+```
+
+Peata ühendus
+```{r}
+# remDr %>%
+#   deleteSession()
+```
+
+
+Funktsioon Eestiga seotud Endomondo challange lehtede järgnevate lehekülgede info kraapimiseks.
+Vajalik on next nuppu klikkida nii mitu korda kui mitmel lehel andmed on
+```{r}
+kraabi_profiili_lehed <- function(x){
+  tryCatch(
+    {
+      # tee paus 0.5-1.5 sekundit
+      Sys.sleep(runif(1, 0.5, 1.5))
+      
+      remDr %>%
+        findElement("css", ".next") %>%
+        elementClick()
+      
+      leht_challange <- remDr %>% 
+        getPageSource()
+      
+      # profiili url
+      profiil_2 <- leht_challange %>% 
+        html_nodes(".name") %>% 
+        html_attr("href")
+      
+      profiil_2 <- data_frame(profiil_id = profiil_2)
+      
+      return(profiil_2)
+    }, error = function(e) NULL
+  )
+}
+
+```
+
+
+Kraabi eestlaste Endomondo profiili ID-d, et selle põhjal pärida trennide andmeid.
+```{r}
+kraabi_profiili_id <- function(url_challange, lehti){
+  tryCatch(
+    {
+      remDr %>% 
+        go(url_challange)
+      
+      leht_challange <- remDr %>%
+        getPageSource()
+      
+      profiil_1 <- leht_challange %>% 
+        html_nodes(".name") %>% 
+        html_attr("href")
+      
+      # kliki nii mitu korda next nupul kui lehega on seotud lehekülgi
+      # kraabi igalt leheküljelt profiili id-d
+      profiil_2 <- map_df(seq(1:lehti), kraabi_profiili_lehed)
+      
+      # pana avalehe ja järgnevate lehtede profiili id-d kokku
+      profiil <- data_frame(profiil_id = profiil_1) %>% 
+        bind_rows(profiil_2) %>% 
+        distinct(profiil_id) %>% 
+        mutate(challange = url_challange)
+      
+      return(profiil)
+      
+    }, error = function(e) NULL
+  )
+}
+```
+
+Kraabi Eestiga seotud challange lehtedelt profiili ID-d
+```{r}
+endomondo_profiilid <- map2_df(eesti_endomondo_challange$url, 
+        eesti_endomondo_challange$lehti, 
+        kraabi_profiili_id)
+```
+
+Töötle profiile
+```{r}
+eesti_endomondo_profile_id <- endomondo_profiilid %>% 
+  mutate(profile_id = as.numeric(str_extract(profiil_id, "[0-9].*"))) %>% 
+  distinct(profile_id) %>% 
+  filter(!is.na(profile_id))
+```
+
+
+Salvesta Eesti Endomondo profiilid
+```{r}
+# save(eesti_endomondo_profile_id, file = "data/endomondo_profiilid.RData")
+```
+
+Lae eelnevalt kraabitud Eesti Endomondo profiili ID-d
+```{r}
+load("data/endomondo_profiilid.RData")
+```
+
+Funktsioon, mis avab profiili lehelt more nupu alt rohkem infot
+Seda saam map_df abil korrata
+
+NB! Seda siiski ei kasutanud kuna tegi kogu andmete kraapimise aglaseks ja ebastabiilseks
+```{r}
+ava_more <- function(x){
+  tryCatch(
+    {
+      # seisa n sekundid more nupul, et leht jõuaks avaneda  
+      Sys.sleep(1)
+      
+      # ava lehel more nupu alt rohkem infot    
+      remDr %>%
+        findElement("css", ".moreBlock", retry = FALSE)  %>% 
+        elementClick(retry = FALSE)
+      
+    }, error = function(e) NULL
+  )
+}
+```
+
+Kraabi profiilide kohta viimased trenni andmed
+Salvesta tulemused iga profiili kohta eraldi faili
+Nii on lihtsam jätkata pooleli jäänud või ebaõnnestunud tööd
+```{r}
+kraabi_trennid <- function(url){
+  tryCatch(
+    {
+      Sys.sleep(runif(1, 1, 1.2))
+      
+      # kontrolli, mis on avatud url
+      # kui url on suunatud endomondo avalehele, 
+      # siis ei ole profiil avalik ja edasist protseduuri ei pea läbima
+      current_url <- remDr %>% 
+        go(url) %>% 
+        getCurrentUrl()
+      
+      if(current_url != url) {
+        NULL
+      } else {
+      
+      # ava more nupu alt rohkem infot
+      # kliki nupule n korda
+      # map(seq(1:2), ava_more)  
+      # 
+      # Sys.sleep(3)
+        
+      leht <- remDr %>%
+        getPageSource()
+             
+      workout_url <- leht %>%
+        html_nodes(".pathLink") %>% 
+        html_attr("href")
+      
+      workout_info <- leht %>% 
+        html_nodes(".pathLink span") %>% 
+        html_text()
+      
+      workout_date <- leht %>% 
+        html_nodes(".date") %>% 
+        html_text()
+      
+      profile_info <- leht %>% 
+        html_nodes(".profileInfo") %>% 
+        html_text()
+      
+      workout <- data_frame(workout_url, workout_date = workout_date[-1], workout_info,
+                            profile_info) %>% 
+        mutate(profile_url = url)
+      
+      # profiili id faili nimesse
+      profile_id <- str_replace(url, "https://www.endomondo.com/profile/", "")
+      
+      # faili salvestamise asukoht ja faili nimi
+      trenni_file <- str_c("output/trennid/", profile_id, ".feather", sep = "")
+      
+      write_feather(workout, trenni_file)
+      }
+    }, error = function(e) NULL
+  )
+}
+```
+
+Töötle profiili ID andmeid nii, et lisa sinna vajalik url
+```{r}
+endomondo_profile_id_url <- eesti_endomondo_profile_id %>% 
+  mutate(profile_url = str_c("https://www.endomondo.com/profile/", profile_id))
+```
+
+Kraabi trenni andmed
+Kokku võttis see 9200 profiili puhul aega ca 17H
+```{r}
+system.time(
+map(endomondo_profile_id_url$profile_url, kraabi_trennid)
+)
+
+```
+
+
+Lae trenni andmed failidest ühte data_frame kokku
+```{r}
+# failide nimekiri laadimiseks
+trenni_files = list.files("output/trennid/", full.names = TRUE)
+
+trennid_raw <- map_df(trenni_files, read_feather)
+```
+
+Salvesta viimase 20 trenni andmed ca 5000 Eesti Endomondo kasutaja kohta seisuga 14.07.2017
+```{r}
+save(trennid_raw, file = "output/trennid_raw.RData")
+```
